@@ -90,6 +90,8 @@ int main(void)
   GPIO_PinState button_raw_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
   GPIO_PinState button_stable_state = button_raw_state;
   uint32_t button_last_change_tick = HAL_GetTick();
+  GPIO_PinState led_state = GPIO_PIN_SET;
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_state);
 
   /* USER CODE END 2 */
 
@@ -104,13 +106,16 @@ int main(void)
       button_last_change_tick = HAL_GetTick();
     }
 
-    if ((HAL_GetTick() - button_last_change_tick) >= 20U)
+    if ((HAL_GetTick() - button_last_change_tick) >= 20U &&
+        button_stable_state != button_raw_state)
     {
       button_stable_state = button_raw_state;
+      if (button_stable_state == GPIO_PIN_RESET)
+      {
+        led_state = (led_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_state);
+      }
     }
-
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13,
-                      button_stable_state == GPIO_PIN_RESET ? GPIO_PIN_RESET : GPIO_PIN_SET);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
