@@ -90,7 +90,12 @@ int main(void)
   GPIO_PinState button_raw_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
   GPIO_PinState button_stable_state = button_raw_state;
   uint32_t button_last_change_tick = HAL_GetTick();
+  uint32_t button_pressed_tick = (button_stable_state == GPIO_PIN_RESET) ? HAL_GetTick() : 0U;
+  uint32_t button_released_tick = 0U;
+  uint32_t led_blink_tick = 0U;
+  uint8_t long_press_active = 0U;
   GPIO_PinState led_state = GPIO_PIN_SET;
+  GPIO_PinState led_blink_state = led_state;
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_state);
 
   /* USER CODE END 2 */
@@ -104,6 +109,10 @@ int main(void)
     {
       button_raw_state = button_current_state;
       button_last_change_tick = HAL_GetTick();
+      if (button_raw_state == GPIO_PIN_SET)
+      {
+        button_released_tick = button_last_change_tick;
+      }
     }
 
     if ((HAL_GetTick() - button_last_change_tick) >= 20U &&
@@ -112,9 +121,38 @@ int main(void)
       button_stable_state = button_raw_state;
       if (button_stable_state == GPIO_PIN_RESET)
       {
-        led_state = (led_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        button_pressed_tick = HAL_GetTick();
+        long_press_active = 0U;
+      }
+      else
+      {
+        if (long_press_active == 0U &&
+            (button_released_tick - button_pressed_tick) < 1000U)
+        {
+          led_state = (led_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+        }
+        long_press_active = 0U;
         HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_state);
       }
+    }
+
+    if (button_stable_state == GPIO_PIN_RESET &&
+        button_raw_state == GPIO_PIN_RESET &&
+        long_press_active == 0U &&
+        (HAL_GetTick() - button_pressed_tick) >= 1000U)
+    {
+      long_press_active = 1U;
+      led_blink_tick = HAL_GetTick();
+      led_blink_state = (led_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_blink_state);
+    }
+
+    if (long_press_active != 0U &&
+        (HAL_GetTick() - led_blink_tick) >= 100U)
+    {
+      led_blink_tick = HAL_GetTick();
+      led_blink_state = (led_blink_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_blink_state);
     }
     /* USER CODE END WHILE */
 
