@@ -87,68 +87,12 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
-    typedef enum
-    {
-      LED_MODE_OFF,
-      LED_MODE_ON,
-      LED_MODE_BLINK
-    } LedMode;
-
-  GPIO_PinState button_raw_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-  GPIO_PinState button_stable_state = button_raw_state;
-  uint32_t button_last_change_tick = HAL_GetTick();
-  uint32_t led_blink_tick = 0U;
-    LedMode led_mode = LED_MODE_OFF;
-    GPIO_PinState led_output_state = GPIO_PIN_SET;
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_output_state);
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    GPIO_PinState button_current_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-    if (button_current_state != button_raw_state)
-    {
-      button_raw_state = button_current_state;
-      button_last_change_tick = HAL_GetTick();
-    }
-
-    if ((HAL_GetTick() - button_last_change_tick) >= 20U &&
-        button_stable_state != button_raw_state)
-    {
-      button_stable_state = button_raw_state;
-      if (button_stable_state == GPIO_PIN_RESET)
-      {
-        led_mode = (LedMode)((led_mode + 1) % 3);
-        led_blink_tick = HAL_GetTick();
-
-        if (led_mode == LED_MODE_OFF)
-        {
-          led_output_state = GPIO_PIN_SET;
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_output_state);
-        }
-        else if (led_mode == LED_MODE_ON)
-        {
-          led_output_state = GPIO_PIN_RESET;
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_output_state);
-        }
-        else
-        {
-          led_output_state = GPIO_PIN_RESET;
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_output_state);
-        }
-      }
-    }
-
-    if (led_mode == LED_MODE_BLINK &&
-        (HAL_GetTick() - led_blink_tick) >= 500U)
-    {
-      led_blink_tick = HAL_GetTick();
-      led_output_state = (led_output_state == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, led_output_state);
-    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -195,6 +139,17 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_0)
+  {
+    HAL_Delay(20);
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET)
+    {
+      HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    }
+  }
+}
 
 /* USER CODE END 4 */
 
