@@ -44,6 +44,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static const uint16_t led_toggle_intervals_ms[] = {500U, 250U, 100U};
+static volatile uint16_t led_toggle_interval_ms = 500U;
+static volatile uint16_t led_elapsed_ms = 0U;
 
 /* USER CODE END PV */
 
@@ -89,6 +92,11 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  GPIO_PinState raw_button_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+  GPIO_PinState stable_button_state = raw_button_state;
+  uint32_t button_state_change_tick = HAL_GetTick();
+  uint8_t frequency_index = 0U;
+
   if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
   {
     Error_Handler();
@@ -102,6 +110,28 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    GPIO_PinState button_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+    uint32_t now = HAL_GetTick();
+
+    if (button_state != raw_button_state)
+    {
+      raw_button_state = button_state;
+      button_state_change_tick = now;
+    }
+
+    if ((button_state != stable_button_state) &&
+        ((now - button_state_change_tick) >= 20U))
+    {
+      stable_button_state = button_state;
+      if (stable_button_state == GPIO_PIN_RESET)
+      {
+        frequency_index = (uint8_t)((frequency_index + 1U) % 3U);
+        __disable_irq();
+        led_toggle_interval_ms = led_toggle_intervals_ms[frequency_index];
+        led_elapsed_ms = 0U;
+        __enable_irq();
+      }
+    }
   }
   /* USER CODE END 3 */
 }
@@ -150,7 +180,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)
   {
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    led_elapsed_ms++;
+    if (led_elapsed_ms >= led_toggle_interval_ms)
+    {
+      led_elapsed_ms = 0U;
+      HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    }
   }
 }
 
