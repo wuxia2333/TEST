@@ -24,7 +24,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -46,40 +48,41 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static const uint16_t led_pwm_pulse_counts[] = {200U, 500U, 800U};
-static uint8_t led_pwm_duty_index = 0U;
-static uint32_t runtime_seconds = 0U;
-static volatile uint32_t scheduler_tick_count = 0U;
-
-typedef void (*SchedulerTaskFunction)(void);
-
-typedef struct
+typedef enum
 {
-  uint16_t period_ms;
-  uint16_t elapsed_ms;
-  volatile uint8_t pending;
-  SchedulerTaskFunction function;
-} SchedulerTask;
+  LED_MODE_BREATH = 0U,
+  LED_MODE_BLINK,
+  LED_MODE_OFF
+} LedMode;
 
-static void Task_ToggleLed1(void);
-static void Task_ToggleLed2(void);
-static void Task_PrintRuntime(void);
-static void Task_UpdateLedPwm(void);
+#define UART_LINE_SIZE 32U
+#define UART_QUEUE_SIZE 4U
+#define PWM_MAX_DUTY 1000U
 
-static SchedulerTask scheduler_tasks[] =
-{
-  {100U, 0U, 0U, Task_ToggleLed1},
-  {500U, 0U, 0U, Task_ToggleLed2},
-  {1000U, 0U, 0U, Task_PrintRuntime},
-  {1000U, 0U, 0U, Task_UpdateLedPwm}
-};
+static volatile uint8_t led_mode = LED_MODE_BREATH;
+static volatile uint8_t breath_speed = 1U;
+static uint8_t uart_rx_byte;
+static char uart_rx_line[UART_LINE_SIZE];
+static uint8_t uart_rx_length;
+static uint8_t uart_rx_discarding;
+static char uart_rx_queue[UART_QUEUE_SIZE][UART_LINE_SIZE];
+static volatile uint8_t uart_rx_queue_head;
+static volatile uint8_t uart_rx_queue_tail;
+static volatile uint32_t uart_rejected_lines;
+static volatile uint32_t uart_error_count;
+static volatile uint8_t uart_rx_restart_failed;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-static void Scheduler_RunReadyTasks(void);
+static void UART_ProcessCommands(void);
+static void UART_ProcessCommand(const char *command);
+static void UART_Printf(const char *format, ...);
+static void UART_ReportReceiveErrors(void);
+static uint8_t UART_GetLine(char *line);
+static const char *UART_ModeName(uint8_t mode);
 
 /* USER CODE END PFP */
 
@@ -121,7 +124,7 @@ int main(void)
   MX_TIM3_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, led_pwm_pulse_counts[0]);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
@@ -130,6 +133,12 @@ int main(void)
   {
     Error_Handler();
   }
+  if (HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1U) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  UART_Printf("Breathing LED ready (PA6, 1 kHz). Commands: SPD=1..10, "
+              "MODE=BREATH|BLINK|OFF, ?\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -139,7 +148,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Scheduler_RunReadyTasks();
+    UART_ProcessCommands();
+    UART_ReportReceiveErrors();
   }
   /* USER CODE END 3 */
 }
@@ -184,51 +194,15 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-static void Scheduler_RunReadyTasks(void)
+static void UART_Printf(const char *format, ...)
 {
-  uint32_t task_index;
-
-  for (task_index = 0U;
-       task_index < (sizeof(scheduler_tasks) / sizeof(scheduler_tasks[0]));
-       task_index++)
-  {
-    uint8_t task_pending;
-    uint32_t primask = __get_PRIMASK();
-
-    __disable_irq();
-    task_pending = scheduler_tasks[task_index].pending;
-    scheduler_tasks[task_index].pending = 0U;
-    if (primask == 0U)
-    {
-      __enable_irq();
-    }
-
-    if (task_pending != 0U)
-    {
-      scheduler_tasks[task_index].function();
-    }
-  }
-}
-
-static void Task_ToggleLed1(void)
-{
-  HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-}
-
-static void Task_ToggleLed2(void)
-{
-  HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
-}
-
-static void Task_PrintRuntime(void)
-{
-  char message[32];
+  char message[112];
   int message_length;
+  va_list arguments;
 
-  runtime_seconds++;
-  message_length = snprintf(message, sizeof(message),
-                            "Runtime: %lu s\r\n",
-                            (unsigned long)runtime_seconds);
+  va_start(arguments, format);
+  message_length = vsnprintf(message, sizeof(message), format, arguments);
+  va_end(arguments);
   if ((message_length < 0) || ((size_t)message_length >= sizeof(message)))
   {
     Error_Handler();
@@ -240,31 +214,282 @@ static void Task_PrintRuntime(void)
   }
 }
 
-static void Task_UpdateLedPwm(void)
+static const char *UART_ModeName(uint8_t mode)
 {
-  led_pwm_duty_index = (uint8_t)((led_pwm_duty_index + 1U) % 3U);
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1,
-                        led_pwm_pulse_counts[led_pwm_duty_index]);
+  switch (mode)
+  {
+    case LED_MODE_BREATH:
+      return "BREATH";
+    case LED_MODE_BLINK:
+      return "BLINK";
+    case LED_MODE_OFF:
+      return "OFF";
+    default:
+      Error_Handler();
+      return "";
+  }
+}
+
+static void UART_ProcessCommand(const char *command)
+{
+  uint8_t command_length = (uint8_t)strlen(command);
+
+  if (strcmp(command, "?") == 0)
+  {
+    UART_Printf("MODE=%s SPD=%u\r\n",
+                UART_ModeName(led_mode), (unsigned int)breath_speed);
+  }
+  else if ((command_length >= 5U) && (strncmp(command, "SPD=", 4U) == 0))
+  {
+    uint8_t new_speed;
+
+    if ((command_length == 5U) &&
+        (command[4] >= '1') && (command[4] <= '9'))
+    {
+      new_speed = (uint8_t)(command[4] - '0');
+    }
+    else if ((command_length == 6U) &&
+             (command[4] == '1') && (command[5] == '0'))
+    {
+      new_speed = 10U;
+    }
+    else
+    {
+      UART_Printf("ERR: invalid command\r\n");
+      return;
+    }
+
+    breath_speed = new_speed;
+    UART_Printf("OK SPD=%u\r\n", (unsigned int)breath_speed);
+  }
+  else if (strcmp(command, "MODE=BREATH") == 0)
+  {
+    led_mode = LED_MODE_BREATH;
+    UART_Printf("OK MODE=BREATH\r\n");
+  }
+  else if (strcmp(command, "MODE=BLINK") == 0)
+  {
+    led_mode = LED_MODE_BLINK;
+    UART_Printf("OK MODE=BLINK\r\n");
+  }
+  else if (strcmp(command, "MODE=OFF") == 0)
+  {
+    led_mode = LED_MODE_OFF;
+    UART_Printf("OK MODE=OFF\r\n");
+  }
+  else
+  {
+    UART_Printf("ERR: invalid command\r\n");
+  }
+}
+
+static uint8_t UART_GetLine(char *line)
+{
+  uint8_t has_line = 0U;
+  uint32_t primask = __get_PRIMASK();
+
+  __disable_irq();
+  if (uart_rx_queue_tail != uart_rx_queue_head)
+  {
+    memcpy(line, uart_rx_queue[uart_rx_queue_tail], UART_LINE_SIZE);
+    uart_rx_queue_tail =
+      (uint8_t)((uart_rx_queue_tail + 1U) % UART_QUEUE_SIZE);
+    has_line = 1U;
+  }
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+
+  return has_line;
+}
+
+static void UART_ProcessCommands(void)
+{
+  char command[UART_LINE_SIZE];
+
+  while (UART_GetLine(command) != 0U)
+  {
+    UART_ProcessCommand(command);
+  }
+}
+
+static void UART_ReportReceiveErrors(void)
+{
+  uint32_t rejected;
+  uint32_t uart_errors;
+  uint8_t restart_failed;
+  uint32_t primask = __get_PRIMASK();
+
+  __disable_irq();
+  rejected = uart_rejected_lines;
+  uart_rejected_lines = 0U;
+  uart_errors = uart_error_count;
+  uart_error_count = 0U;
+  restart_failed = uart_rx_restart_failed;
+  uart_rx_restart_failed = 0U;
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+
+  if (rejected != 0U)
+  {
+    UART_Printf("ERR: %lu command line(s) rejected\r\n",
+                (unsigned long)rejected);
+  }
+  if (uart_errors != 0U)
+  {
+    UART_Printf("ERR: %lu UART receive error(s)\r\n",
+                (unsigned long)uart_errors);
+  }
+  if (restart_failed != 0U)
+  {
+    UART_Printf("ERR: UART receive restart failed\r\n");
+    if (HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1U) != HAL_OK)
+    {
+      Error_Handler();
+    }
+  }
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)
   {
-    uint32_t task_index;
+    static uint8_t update_divider;
+    static uint8_t active_mode = 0xFFU;
+    static uint8_t blink_ticks;
+    static uint8_t blink_on;
+    static uint8_t breath_increasing = 1U;
+    static uint16_t brightness;
 
-    scheduler_tick_count++;
-    for (task_index = 0U;
-         task_index < (sizeof(scheduler_tasks) / sizeof(scheduler_tasks[0]));
-         task_index++)
+    update_divider++;
+    if (update_divider >= 10U)
     {
-      scheduler_tasks[task_index].elapsed_ms++;
-      if (scheduler_tasks[task_index].elapsed_ms >=
-          scheduler_tasks[task_index].period_ms)
+      uint8_t mode = led_mode;
+      uint16_t step = (uint16_t)breath_speed * 5U;
+
+      update_divider = 0U;
+      if (mode != active_mode)
       {
-        scheduler_tasks[task_index].elapsed_ms = 0U;
-        scheduler_tasks[task_index].pending = 1U;
+        active_mode = mode;
+        brightness = 0U;
+        breath_increasing = 1U;
+        blink_ticks = 0U;
+        blink_on = 0U;
       }
+
+      switch (mode)
+      {
+        case LED_MODE_BREATH:
+          if (breath_increasing != 0U)
+          {
+            if ((uint16_t)(brightness + step) >= PWM_MAX_DUTY)
+            {
+              brightness = PWM_MAX_DUTY;
+              breath_increasing = 0U;
+            }
+            else
+            {
+              brightness = (uint16_t)(brightness + step);
+            }
+          }
+          else if (brightness <= step)
+          {
+            brightness = 0U;
+            breath_increasing = 1U;
+          }
+          else
+          {
+            brightness = (uint16_t)(brightness - step);
+          }
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, brightness);
+          break;
+
+        case LED_MODE_BLINK:
+          blink_ticks++;
+          if (blink_ticks >= 50U)
+          {
+            blink_ticks = 0U;
+            blink_on = (uint8_t)!blink_on;
+          }
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1,
+                                (blink_on != 0U) ? PWM_MAX_DUTY : 0U);
+          break;
+
+        case LED_MODE_OFF:
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
+          break;
+
+        default:
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
+          break;
+      }
+    }
+  }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    uint8_t received = uart_rx_byte;
+
+    if ((received == '\r') || (received == '\n'))
+    {
+      if (uart_rx_discarding != 0U)
+      {
+        uart_rejected_lines++;
+      }
+      else if (uart_rx_length != 0U)
+      {
+        uint8_t next_head =
+          (uint8_t)((uart_rx_queue_head + 1U) % UART_QUEUE_SIZE);
+
+        if (next_head == uart_rx_queue_tail)
+        {
+          uart_rejected_lines++;
+        }
+        else
+        {
+          uart_rx_line[uart_rx_length] = '\0';
+          memcpy(uart_rx_queue[uart_rx_queue_head], uart_rx_line,
+                 (size_t)uart_rx_length + 1U);
+          uart_rx_queue_head = next_head;
+        }
+      }
+      uart_rx_length = 0U;
+      uart_rx_discarding = 0U;
+    }
+    else if (uart_rx_discarding == 0U)
+    {
+      if (uart_rx_length < (UART_LINE_SIZE - 1U))
+      {
+        uart_rx_line[uart_rx_length] = (char)received;
+        uart_rx_length++;
+      }
+      else
+      {
+        uart_rx_discarding = 1U;
+      }
+    }
+
+    if (HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1U) != HAL_OK)
+    {
+      uart_rx_restart_failed = 1U;
+    }
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    uart_error_count++;
+    if (HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1U) != HAL_OK)
+    {
+      uart_rx_restart_failed = 1U;
     }
   }
 }
