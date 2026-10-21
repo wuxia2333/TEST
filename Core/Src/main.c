@@ -19,10 +19,12 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -45,14 +47,39 @@
 
 /* USER CODE BEGIN PV */
 static const uint16_t led_pwm_pulse_counts[] = {200U, 500U, 800U};
-static volatile uint16_t led_pwm_elapsed_ms = 0U;
-static volatile uint8_t led_pwm_duty_index = 0U;
+static uint8_t led_pwm_duty_index = 0U;
+static uint32_t runtime_seconds = 0U;
+static volatile uint32_t scheduler_tick_count = 0U;
+
+typedef void (*SchedulerTaskFunction)(void);
+
+typedef struct
+{
+  uint16_t period_ms;
+  uint16_t elapsed_ms;
+  volatile uint8_t pending;
+  SchedulerTaskFunction function;
+} SchedulerTask;
+
+static void Task_ToggleLed1(void);
+static void Task_ToggleLed2(void);
+static void Task_PrintRuntime(void);
+static void Task_UpdateLedPwm(void);
+
+static SchedulerTask scheduler_tasks[] =
+{
+  {100U, 0U, 0U, Task_ToggleLed1},
+  {500U, 0U, 0U, Task_ToggleLed2},
+  {1000U, 0U, 0U, Task_PrintRuntime},
+  {1000U, 0U, 0U, Task_UpdateLedPwm}
+};
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+static void Scheduler_RunReadyTasks(void);
 
 /* USER CODE END PFP */
 
@@ -92,6 +119,7 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, led_pwm_pulse_counts[0]);
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
@@ -111,6 +139,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Scheduler_RunReadyTasks();
   }
   /* USER CODE END 3 */
 }
@@ -155,17 +184,87 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void Scheduler_RunReadyTasks(void)
+{
+  uint32_t task_index;
+
+  for (task_index = 0U;
+       task_index < (sizeof(scheduler_tasks) / sizeof(scheduler_tasks[0]));
+       task_index++)
+  {
+    uint8_t task_pending;
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    task_pending = scheduler_tasks[task_index].pending;
+    scheduler_tasks[task_index].pending = 0U;
+    if (primask == 0U)
+    {
+      __enable_irq();
+    }
+
+    if (task_pending != 0U)
+    {
+      scheduler_tasks[task_index].function();
+    }
+  }
+}
+
+static void Task_ToggleLed1(void)
+{
+  HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+}
+
+static void Task_ToggleLed2(void)
+{
+  HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+}
+
+static void Task_PrintRuntime(void)
+{
+  char message[32];
+  int message_length;
+
+  runtime_seconds++;
+  message_length = snprintf(message, sizeof(message),
+                            "Runtime: %lu s\r\n",
+                            (unsigned long)runtime_seconds);
+  if ((message_length < 0) || ((size_t)message_length >= sizeof(message)))
+  {
+    Error_Handler();
+  }
+  if (HAL_UART_Transmit(&huart1, (uint8_t *)message,
+                        (uint16_t)message_length, HAL_MAX_DELAY) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void Task_UpdateLedPwm(void)
+{
+  led_pwm_duty_index = (uint8_t)((led_pwm_duty_index + 1U) % 3U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1,
+                        led_pwm_pulse_counts[led_pwm_duty_index]);
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)
   {
-    led_pwm_elapsed_ms++;
-    if (led_pwm_elapsed_ms >= 1000U)
+    uint32_t task_index;
+
+    scheduler_tick_count++;
+    for (task_index = 0U;
+         task_index < (sizeof(scheduler_tasks) / sizeof(scheduler_tasks[0]));
+         task_index++)
     {
-      led_pwm_elapsed_ms = 0U;
-      led_pwm_duty_index = (uint8_t)((led_pwm_duty_index + 1U) % 3U);
-      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1,
-                            led_pwm_pulse_counts[led_pwm_duty_index]);
+      scheduler_tasks[task_index].elapsed_ms++;
+      if (scheduler_tasks[task_index].elapsed_ms >=
+          scheduler_tasks[task_index].period_ms)
+      {
+        scheduler_tasks[task_index].elapsed_ms = 0U;
+        scheduler_tasks[task_index].pending = 1U;
+      }
     }
   }
 }
